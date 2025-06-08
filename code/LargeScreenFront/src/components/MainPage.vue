@@ -52,6 +52,7 @@ const chartRef1 = ref(null)
 const chartRef2 = ref(null)
 const chartRef3 = ref(null)
 const chartRef4 = ref(null)
+const expandedChartRef = ref(null)
 const expandedChart = ref(null)
 
 // 切换图表大小
@@ -63,61 +64,6 @@ const toggleChartSize = (chartIndex) => {
     // 否则展开当前图表
     expandedChart.value = chartIndex
   }
-  
-  // 在下一个渲染周期更新图表大小
-  nextTick(() => {
-    const chartRefs = [chartRef1, chartRef2, chartRef3, chartRef4]
-    chartRefs.forEach((ref, index) => {
-      if (ref.value) {
-        const chart = echarts.getInstanceByDom(ref.value)
-        if (chart) {
-          // 更新图表配置
-          const option = chart.getOption()
-          if (expandedChart.value === index) {
-            // 展开状态下的配置
-            option.title.textStyle.fontSize = 36
-            option.legend.textStyle.fontSize = 24
-            option.xAxis.axisLabel.fontSize = 24
-            option.yAxis.axisLabel.fontSize = 24
-            option.yAxis.nameTextStyle.fontSize = 24
-            option.graphic[0].style.fontSize = 28
-            option.tooltip.textStyle.fontSize = 24
-            option.legend.itemWidth = 30
-            option.legend.itemHeight = 20
-            option.legend.top = 50
-            option.grid = {
-              left: '3%',
-              right: '3%',
-              bottom: '5%',
-              top: '10%',
-              containLabel: true
-            }
-          } else {
-            // 正常状态下的配置
-            option.title.textStyle.fontSize = 16
-            option.legend.textStyle.fontSize = 10
-            option.xAxis.axisLabel.fontSize = 10
-            option.yAxis.axisLabel.fontSize = 10
-            option.yAxis.nameTextStyle.fontSize = 10
-            option.graphic[0].style.fontSize = 12
-            option.tooltip.textStyle.fontSize = 12
-            option.legend.itemWidth = 15
-            option.legend.itemHeight = 10
-            option.legend.top = 35
-            option.grid = {
-              left: '10%',
-              right: '10%',
-              bottom: '20%',
-              top: '25%',
-              containLabel: true
-            }
-          }
-          chart.setOption(option)
-          chart.resize()
-        }
-      }
-    })
-  })
 }
 
 // 加载数据的方法
@@ -147,8 +93,136 @@ const loadData = async () => {
     const titles = ['西北方向 (NW)', '东北方向 (NE)', '西南方向 (SW)', '东南方向 (SE)']
     const colors = getChartColors()
     
+    // 如果是展开状态，只渲染展开的图表
+    if (expandedChart.value !== null) {
+      const expandedIndex = expandedChart.value
+      const direction = directions[expandedIndex]
+      const data = directionData[direction]
+      const chartElement = expandedChartRef.value
+      
+      if (chartElement) {
+        const chart = echarts.init(chartElement)
+        
+        // 获取该方向的所有车道
+        const lanes = getLanesFromData(data)
+        
+        // 为每个车道创建时间序列数据
+        const series = lanes.map((lane, laneIndex) => {
+          const laneData = createLaneTimeSeriesData(data, lane)
+          
+          return {
+            name: `车道 ${lane}`,
+            type: 'line',
+            data: laneData,
+            smooth: true,
+            lineStyle: { 
+              color: colors[laneIndex % colors.length],
+              width: 2
+            },
+            itemStyle: { 
+              color: colors[laneIndex % colors.length]
+            },
+            symbol: 'circle',
+            symbolSize: 4
+          }
+        })
+        
+        chart.setOption({
+          title: {
+            text: titles[expandedIndex],
+            left: 'center',
+            top: 20,
+            textStyle: { 
+              color: '#333', 
+              fontSize: 36,
+              fontWeight: 'bold'
+            }
+          },
+          tooltip: { 
+            trigger: 'axis',
+            backgroundColor: 'rgba(255,255,255,0.95)',
+            borderColor: '#cc6600',
+            textStyle: { 
+              color: '#333',
+              fontSize: 24
+            },
+            formatter: function(params) {
+              let result = `时间: ${new Date(params[0].value[0]).toLocaleString()}<br/>`
+              params.forEach(param => {
+                result += `${param.seriesName}: ${param.value[1]} 辆<br/>`
+              })
+              return result
+            }
+          },
+          legend: {
+            top: 50,
+            textStyle: { 
+              color: '#333', 
+              fontSize: 24
+            },
+            itemWidth: 30,
+            itemHeight: 20
+          },
+          xAxis: {
+            type: 'time',
+            axisLabel: { 
+              color: '#666',
+              fontSize: 24,
+              formatter: function(value) {
+                return new Date(value).toLocaleTimeString('zh-CN', { 
+                  hour: '2-digit', 
+                  minute: '2-digit' 
+                })
+              }
+            },
+            axisLine: { lineStyle: { color: '#ccc' } }
+          },
+          yAxis: { 
+            type: 'value', 
+            axisLabel: { 
+              color: '#666', 
+              fontSize: 24
+            },
+            axisLine: { lineStyle: { color: '#ccc' } },
+            name: '车辆数',
+            nameTextStyle: { 
+              color: '#666',
+              fontSize: 24
+            }
+          },
+          series: series,
+          backgroundColor: 'transparent',
+          grid: {
+            left: '3%',
+            right: '3%',
+            bottom: '5%',
+            top: '10%',
+            containLabel: true
+          },
+          graphic: [
+            {
+              type: 'text',
+              left: 'center',
+              bottom: '2%',
+              style: {
+                text: `车道数: ${lanes.length} | 数据点: ${data.length}`,
+                textAlign: 'center',
+                fill: '#999',
+                fontSize: 28
+              }
+            }
+          ]
+        })
+      }
+      return
+    }
+    
+    // 正常状态，渲染所有四个图表
     directions.forEach((direction, index) => {
-      const chart = echarts.init(chartRefs[index].value)
+      const chartElement = chartRefs[index].value
+      if (!chartElement) return
+      
+      const chart = echarts.init(chartElement)
       const data = directionData[direction]
       
       // 获取该方向的所有车道
@@ -175,14 +249,14 @@ const loadData = async () => {
         }
       })
       
-      chart.setOption({
+            chart.setOption({
         title: {
           text: titles[index],
           left: 'center',
-          top: expandedChart.value === index ? 20 : 10,
+          top: 10,
           textStyle: { 
             color: '#333', 
-            fontSize: expandedChart.value === index ? 36 : 16,
+            fontSize: 16,
             fontWeight: 'bold'
           }
         },
@@ -192,7 +266,7 @@ const loadData = async () => {
           borderColor: '#cc6600',
           textStyle: { 
             color: '#333',
-            fontSize: expandedChart.value === index ? 24 : 12
+            fontSize: 12
           },
           formatter: function(params) {
             let result = `时间: ${new Date(params[0].value[0]).toLocaleString()}<br/>`
@@ -203,19 +277,19 @@ const loadData = async () => {
           }
         },
         legend: {
-          top: expandedChart.value === index ? 50 : 35,
+          top: 35,
           textStyle: { 
             color: '#333', 
-            fontSize: expandedChart.value === index ? 24 : 10
+            fontSize: 10
           },
-          itemWidth: expandedChart.value === index ? 30 : 15,
-          itemHeight: expandedChart.value === index ? 20 : 10
+          itemWidth: 15,
+          itemHeight: 10
         },
         xAxis: {
           type: 'time',
           axisLabel: { 
             color: '#666',
-            fontSize: expandedChart.value === index ? 24 : 10,
+            fontSize: 10,
             formatter: function(value) {
               return new Date(value).toLocaleTimeString('zh-CN', { 
                 hour: '2-digit', 
@@ -229,22 +303,22 @@ const loadData = async () => {
           type: 'value', 
           axisLabel: { 
             color: '#666', 
-            fontSize: expandedChart.value === index ? 24 : 10
+            fontSize: 10
           },
           axisLine: { lineStyle: { color: '#ccc' } },
           name: '车辆数',
           nameTextStyle: { 
             color: '#666',
-            fontSize: expandedChart.value === index ? 24 : 10
+            fontSize: 10
           }
         },
         series: series,
         backgroundColor: 'transparent',
         grid: {
-          left: expandedChart.value === index ? '3%' : '10%',
-          right: expandedChart.value === index ? '3%' : '10%',
-          bottom: expandedChart.value === index ? '5%' : '20%',
-          top: expandedChart.value === index ? '10%' : '25%',
+          left: '10%',
+          right: '10%',
+          bottom: '20%',
+          top: '25%',
           containLabel: true
         },
         graphic: [
@@ -256,7 +330,7 @@ const loadData = async () => {
               text: `车道数: ${lanes.length} | 数据点: ${data.length}`,
               textAlign: 'center',
               fill: '#999',
-              fontSize: expandedChart.value === index ? 28 : 12
+              fontSize: 12
             }
           }
         ]
@@ -272,19 +346,47 @@ watch([selectedIntersection, selectedTimeRange, selectedUnit], () => {
   loadData()
 })
 
+// 监听展开状态变化，重新渲染图表
+watch(expandedChart, async (newVal, oldVal) => {
+  if (newVal !== oldVal) {
+    await nextTick()
+    setTimeout(() => {
+      loadData()
+    }, 100)
+  }
+})
+
 onMounted(async () => {
   await nextTick()
-
-  // 初始加载数据
-  await loadData()
+  
+  // 延迟加载确保DOM完全渲染
+  setTimeout(async () => {
+    console.log('开始初始化图表...')
+    console.log('Chart refs:', {
+      ref1: chartRef1.value,
+      ref2: chartRef2.value, 
+      ref3: chartRef3.value,
+      ref4: chartRef4.value
+    })
+    
+    await loadData()
+  }, 200)
   
   // 监听窗口大小变化，自动调整图表大小
   window.addEventListener('resize', () => {
-    [chartRef1, chartRef2, chartRef3, chartRef4].forEach(ref => {
-      if (ref.value) {
-        echarts.getInstanceByDom(ref.value)?.resize()
+    if (expandedChart.value !== null) {
+      // 展开状态
+      if (expandedChartRef.value) {
+        echarts.getInstanceByDom(expandedChartRef.value)?.resize()
       }
-    })
+    } else {
+      // 正常状态
+      [chartRef1, chartRef2, chartRef3, chartRef4].forEach(ref => {
+        if (ref.value) {
+          echarts.getInstanceByDom(ref.value)?.resize()
+        }
+      })
+    }
   })
 })
 </script>
@@ -330,36 +432,40 @@ onMounted(async () => {
 
     <!-- 图表区域 -->
     <div class="charts">
-      <div class="chart-row" v-show="expandedChart === null || expandedChart === 0 || expandedChart === 1">
-        <div 
-          ref="chartRef1" 
-          class="chart-quarter" 
-          :class="{ 'expanded': expandedChart === 0 }"
-          @dblclick="toggleChartSize(0)"
-          v-show="expandedChart === null || expandedChart === 0"
-        ></div>
-        <div 
-          ref="chartRef2" 
-          class="chart-quarter" 
-          :class="{ 'expanded': expandedChart === 1 }"
-          @dblclick="toggleChartSize(1)"
-          v-show="expandedChart === null || expandedChart === 1"
-        ></div>
+      <!-- 正常显示的四个图表 -->
+      <div v-if="expandedChart === null" class="normal-charts-container">
+        <div class="chart-row">
+          <div 
+            ref="chartRef1" 
+            class="chart-quarter"
+            @dblclick="toggleChartSize(0)"
+          ></div>
+          <div 
+            ref="chartRef2" 
+            class="chart-quarter"
+            @dblclick="toggleChartSize(1)"
+          ></div>
+        </div>
+        <div class="chart-row">
+          <div 
+            ref="chartRef3" 
+            class="chart-quarter"
+            @dblclick="toggleChartSize(2)"
+          ></div>
+          <div 
+            ref="chartRef4" 
+            class="chart-quarter"
+            @dblclick="toggleChartSize(3)"
+          ></div>
+        </div>
       </div>
-      <div class="chart-row" v-show="expandedChart === null || expandedChart === 2 || expandedChart === 3">
+      
+      <!-- 展开的图表 -->
+      <div v-else class="expanded-chart-container">
         <div 
-          ref="chartRef3" 
-          class="chart-quarter" 
-          :class="{ 'expanded': expandedChart === 2 }"
-          @dblclick="toggleChartSize(2)"
-          v-show="expandedChart === null || expandedChart === 2"
-        ></div>
-        <div 
-          ref="chartRef4" 
-          class="chart-quarter" 
-          :class="{ 'expanded': expandedChart === 3 }"
-          @dblclick="toggleChartSize(3)"
-          v-show="expandedChart === null || expandedChart === 3"
+          ref="expandedChartRef"
+          class="chart-quarter expanded"
+          @dblclick="toggleChartSize(expandedChart)"
         ></div>
       </div>
     </div>
@@ -394,6 +500,14 @@ onMounted(async () => {
   padding: 12px;
 }
 
+.normal-charts-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .chart {
   flex: 1;
   background: rgba(255, 255, 255, 0.8);
@@ -425,18 +539,23 @@ onMounted(async () => {
   cursor: pointer;
 }
 
-.chart-quarter.expanded {
-  position: absolute;
-  top: 0;
-  left: 0;
+.expanded-chart-container {
   width: 100%;
   height: 100%;
-  z-index: 100;
+  display: flex;
+}
+
+.chart-quarter.expanded {
+  flex: 1;
   background: rgba(255, 255, 255, 0.98);
-  border: none;
-  border-radius: 0;
-  box-shadow: none;
+  border: 2px solid rgba(200, 150, 100, 0.5);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
   padding: 20px;
+  width: 95%;
+  height: 95%;
+  margin: auto;
+  transform: scale(0.95);
 }
 
 .control-panel {
