@@ -131,7 +131,7 @@ const loadData = async () => {
           title: {
             text: titles[expandedIndex],
             left: 'center',
-            top: 20,
+            top: 5,
             textStyle: { 
               color: '#333', 
               fontSize: 36,
@@ -203,12 +203,13 @@ const loadData = async () => {
             {
               type: 'text',
               left: 'center',
-              bottom: '2%',
+              bottom: '0.5%',
               style: {
                 text: `车道数: ${lanes.length} | 数据点: ${data.length}`,
                 textAlign: 'center',
                 fill: '#999',
-                fontSize: 28
+                fontSize: 20,
+                fontWeight: 'bold'
               }
             }
           ]

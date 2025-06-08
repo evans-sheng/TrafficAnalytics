@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 200" width="32" height="64">
+  <!-- 外框 -->
+  <rect x="20" y="10" width="60" height="180" rx="10" ry="10" fill="#333" stroke="#666" stroke-width="2"/>
+  
+  <!-- 红灯 -->
+  <circle cx="50" cy="40" r="15" fill="#ff4444"/>
+  
+  <!-- 黄灯 -->
+  <circle cx="50" cy="100" r="15" fill="#ffaa00"/>
+  
+  <!-- 绿灯 -->
+  <circle cx="50" cy="160" r="15" fill="#44ff44"/>
+  
+  <!-- 灯光效果 -->
+  <circle cx="50" cy="40" r="12" fill="#ff6666" opacity="0.8"/>
+  <circle cx="50" cy="100" r="12" fill="#ffcc44" opacity="0.8"/>
+  <circle cx="50" cy="160" r="12" fill="#66ff66" opacity="0.8"/>
+</svg> 
