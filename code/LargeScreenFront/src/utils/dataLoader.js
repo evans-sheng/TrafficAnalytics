@@ -7,7 +7,7 @@
  */
 export const loadCSVData = async (filename) => {
   try {
-    const response = await fetch(`/src/assets/data/${filename}`)
+    const response = await fetch(`/data/${filename}`)
     const text = await response.text()
     const lines = text.split('\n')
     const data = []
