@@ -6,7 +6,7 @@ from tqdm.notebook import tqdm
 
 
 # === 配置部分 ===
-FILE_PATH = "spat_328_20250307000000_20250308000000.txt"
+FILE_PATH = "spat_323_20250307000000_20250308000000.txt"
 MAX_SEARCH = 5000
 TIME_THRESHOLD_MS = 1000
 
@@ -150,3 +150,48 @@ with ThreadPoolExecutor() as executor:
         key, seq = f.result()
         results[key] = seq
         print(f"组 {key} 匹配 {len(seq)} 条记录")
+
+
+# 确保 record 文件夹存在
+os.makedirs('record', exist_ok=True)
+
+# 5. 从 results 中计算 green-occ
+greenocc = []
+csv_rows = []
+for (region_id, node_id, phase_id), events in results.items():
+    events.sort(key=lambda x: x["startTime"])
+    red_idxs = [i for i, ev in enumerate(events) if ev["light"] == "红灯"]
+    for i in range(len(red_idxs) - 1):
+        s = events[red_idxs[i]]["startTime"]
+        e = events[red_idxs[i+1]]["startTime"]
+        total = (e - s).total_seconds()
+        green_sec = sum(
+            (ev["endTime"] - ev["startTime"]).total_seconds()
+            for ev in events
+            if ev["light"] == "绿灯"
+            and ev["startTime"] >= s
+            and ev["endTime"] <= e + timedelta(seconds=4)
+        )
+        ratio = green_sec / total if green_sec > 0 and total > 0 else None
+        greenocc.append({
+            "regionId":  region_id,
+            "nodeId":    node_id,
+            "phaseId":   phase_id,
+            "green-occ": ratio,
+            "startTime": s,
+            "endTime":   e
+        })
+        # 加入 CSV 行
+        csv_rows.append({
+            "startTime": s,
+            "regionId": region_id,
+            "nodeId": node_id,
+            "phaseId": phase_id,
+            "green_ratio": ratio,
+            "cycle_time_sec": total
+        })
+
+# 输出 CSV 到 record 目录
+FILE_OUT_PATH = "record/green_ratio_cycles_323.csv"
+pd.DataFrame(csv_rows).to_csv(FILE_OUT_PATH, index=False, encoding='utf-8')
+print(f"✅ 已保存 CSV 到: {FILE_OUT_PATH}")
