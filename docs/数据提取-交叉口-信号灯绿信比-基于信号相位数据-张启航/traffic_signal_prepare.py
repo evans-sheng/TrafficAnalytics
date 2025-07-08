@@ -12,7 +12,7 @@ import pandas as pd
 
 # === 配置部分 ===
 #选择想要处理的数据集
-FILE_PATH = "spat_323_20250307000000_20250308000000.txt"
+FILE_PATH = "input_data.txt"
 MAX_SEARCH = 5000
 TIME_THRESHOLD_MS = 1000
 
@@ -198,6 +198,6 @@ for (region_id, node_id, phase_id), events in results.items():
         })
 
 # 输出 CSV 到 record 目录
-FILE_OUT_PATH = "record/green_ratio_cycles_323.csv"
+FILE_OUT_PATH = "record/result.csv"
 pd.DataFrame(csv_rows).to_csv(FILE_OUT_PATH, index=False, encoding='utf-8')
 print(f"✅ 已保存 CSV 到: {FILE_OUT_PATH}")
