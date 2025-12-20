@@ -1,9 +1,3 @@
-"""
-返回：
-    lane_df：每个 link_id 的 lane_count
-    final_df：最终 demand 结果（66Demand）
-"""
-
 import requests
 import pandas as pd
 from tqdm import tqdm
@@ -27,10 +21,59 @@ def angle_to_direction(angle):
     return dirs[idx]
 
 
+
+# ------------------------------
+#        查询参数工具函数
+# ------------------------------
+def _parse_beijing_time(value):
+    """Parse 'YYYY-MM-DD HH:mm:ss' (assumed Asia/Shanghai) into tz-naive pandas Timestamp."""
+    if value is None or value == "" or value == -1:
+        return None
+    ts = pd.to_datetime(value, format="%Y-%m-%d %H:%M:%S", errors="raise")
+    # time_bin in this pipeline is tz-naive Beijing time already
+    return ts.to_pydatetime()
+
+def _parse_direction_movement(direction, movement):
+    """Support direction like 'S-L' or 'S', and movement like 'L/T/R' or full names."""
+    if direction in (None, "", -1, "-1"):
+        d = None
+        m = None
+    else:
+        direction = str(direction)
+        if "-" in direction and len(direction.split("-")) == 2:
+            d_part, m_part = direction.split("-", 1)
+            d = d_part.strip().upper()
+            m = m_part.strip().upper()
+        else:
+            d = direction.strip().upper()
+            m = None
+
+    if movement not in (None, "", -1, "-1"):
+        mv = str(movement).strip()
+        # allow L/T/R
+        if mv.upper() in ("L", "T", "R"):
+            m = mv.upper()
+        else:
+            # normalize full english
+            mv_low = mv.lower()
+            if "left" in mv_low:
+                m = "L"
+            elif "through" in mv_low or "straight" in mv_low:
+                m = "T"
+            elif "right" in mv_low:
+                m = "R"
+            else:
+                # unknown, keep as raw full string marker
+                m = mv
+
+    movement_map = {"L": "Left Turn", "T": "Through", "R": "Right Turn"}
+    movement_name = movement_map.get(m, None) if m in movement_map else (movement if movement not in (None,"", -1, "-1") else None)
+    return d, movement_name
+
 # ------------------------------
 # 总入口函数
 # ------------------------------
-def run_pipeline(inters_ids, kafka_file_path):
+def run_pipeline(inters_ids, kafka_file_path, beginTime=None, endTime=None, direction=-1, movement=-1, frequency=2):
 
     # ====================================================
     # 1. 获取 inLinks / outLinks
@@ -198,7 +241,7 @@ def run_pipeline(inters_ids, kafka_file_path):
     # ====================================================
     # 6. 统计每 15min demand
     # ====================================================
-    data["time_bin"] = data["time_beijing"].dt.floor("15min")
+    data["time_bin"] = data["time_beijing"].dt.floor("15min").dt.tz_localize(None)
 
     first_appearance = (
         data.sort_values("time_bin")
@@ -265,6 +308,23 @@ def run_pipeline(inters_ids, kafka_file_path):
             "turn_action": "movement",
         }
     )
+
+
+    # ====================================================
+    # 9. 按查询参数过滤（可选）
+    # ====================================================
+    begin_dt = _parse_beijing_time(beginTime)
+    end_dt = _parse_beijing_time(endTime)
+    if begin_dt is not None:
+        final_df = final_df[final_df["time_bin"] >= begin_dt]
+    if end_dt is not None:
+        final_df = final_df[final_df["time_bin"] <= end_dt]
+
+    d_filter, m_filter = _parse_direction_movement(direction, movement)
+    if d_filter is not None:
+        final_df = final_df[final_df["Direction"].astype(str).str.upper() == d_filter]
+    if m_filter is not None:
+        final_df = final_df[final_df["movement"].astype(str) == m_filter]
 
     return lane66_df, final_df
 
