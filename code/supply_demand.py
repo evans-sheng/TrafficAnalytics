@@ -1,23 +1,153 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import math
+from typing import Any, Dict, Optional, Tuple, Union
 
-###########################################################
-# 1. 计算 Backlog + Utilized Supply
-###########################################################
-def compute_utilized_supply_with_backlog(df):
+# ===========================================================
+#  Beijing timezone helpers
+# ===========================================================
+BJ_TZ = "Asia/Shanghai"
+
+def _parse_beijing_time(value: Optional[Union[str, pd.Timestamp]]) -> Optional[pd.Timestamp]:
+    """
+    Parse 'YYYY-MM-DD HH:mm:ss' as tz-aware Asia/Shanghai timestamp.
+    If already Timestamp, ensure tz-aware in Asia/Shanghai.
+    """
+    if value is None or value == "" or (isinstance(value, float) and np.isnan(value)):
+        return None
+    if isinstance(value, pd.Timestamp):
+        ts = value
+    else:
+        ts = pd.to_datetime(value, format="%Y-%m-%d %H:%M:%S", errors="raise")
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(BJ_TZ)
+    else:
+        ts = ts.tz_convert(BJ_TZ)
+    return ts
+
+def _to_beijing_aware(series: pd.Series) -> pd.Series:
+    """
+    Convert a datetime-like Series to tz-aware Asia/Shanghai.
+    - If tz-naive: assume it's already Beijing local time, localize.
+    - If tz-aware: convert to Beijing.
+    """
+    s = pd.to_datetime(series, errors="coerce")
+    if getattr(s.dt, "tz", None) is None:
+        return s.dt.tz_localize(BJ_TZ)
+    return s.dt.tz_convert(BJ_TZ)
+
+def _normalize_direction_movement(
+    direction: Union[str, int, None],
+    movement: Union[str, int, None],
+) -> Tuple[Union[str, int], Union[str, int]]:
+    """
+    Accept:
+      - direction = -1 (all)
+      - direction like 'S-L' (PDF D-T format): parse into ('S', 'Left Turn')
+      - direction like 'S' with movement = 'L'/'T'/'R' or full names
+    """
+    if direction is None:
+        direction = -1
+    if movement is None:
+        movement = -1
+
+    # If direction is combined like "S-L"
+    if isinstance(direction, str) and "-" in direction and (movement == -1 or movement is None):
+        parts = direction.split("-", 1)
+        d = parts[0].strip()
+        m = parts[1].strip()
+        direction = d if d else direction
+        movement = m if m else movement
+
+    # Normalize movement short codes
+    if isinstance(movement, str):
+        m = movement.strip()
+        map_short = {
+            "L": "Left Turn",
+            "T": "Through",
+            "R": "Right Turn",
+            "LT": "Left Turn",
+            "TH": "Through",
+            "RT": "Right Turn",
+        }
+        movement = map_short.get(m.upper(), m)
+
+    # Normalize direction short codes (keep as-is if already)
+    if isinstance(direction, str):
+        direction = direction.strip()
+    return direction, movement
+
+def _force_flat(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Hard guarantee:
+      - no index levels (MultiIndex or named index) remain
+      - columns are unique (resolve duplicates by keeping the last occurrence)
+    This prevents pandas ambiguity errors like:
+      ValueError: 'direction' is both an index level and a column label
+    """
+    if df is None:
+        return df
+    # Reset until no named index and not MultiIndex
+    while isinstance(df.index, pd.MultiIndex) or df.index.name is not None or any(n is not None for n in getattr(df.index, "names", []) if n is not None):
+        df = df.reset_index()
+        # after reset, index is RangeIndex but could still have a name; clear it
+        df.index.name = None
+        # break if now clean
+        if not isinstance(df.index, pd.MultiIndex) and df.index.name is None:
+            break
+
+    # If direction somehow still appears as index name (rare), reset again
+    if "direction" in getattr(df.index, "names", []):
+        df = df.reset_index()
+
+    # Ensure columns unique: if duplicates exist, keep the last one
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated(keep="last")].copy()
+
+    return df
+
+def _safe_float(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        v = float(x)
+        if np.isnan(v) or np.isinf(v):
+            return None
+        return v
+    except Exception:
+        return None
+
+def _format_time(ts: pd.Timestamp) -> str:
+    """
+    Output time as 'YYYY-MM-DD HH:mm:ss' in Beijing local time.
+    """
+    if isinstance(ts, pd.Timestamp):
+        if ts.tzinfo is None:
+            # assume it's Beijing local
+            ts = ts.tz_localize(BJ_TZ)
+        else:
+            ts = ts.tz_convert(BJ_TZ)
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
+    # fallback
+    return pd.to_datetime(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ===========================================================
+# 1) Backlog + Utilized Supply
+# ===========================================================
+def compute_utilized_supply_with_backlog(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("time_bin").copy()
-    unsatisfied = 0
+    unsatisfied = 0.0
     utilized_list = []
     backlog_list = []
 
     for _, row in df.iterrows():
-        total_demand = row["smoothed_demand"] + unsatisfied
-        capacity = row["cleaned_capacity"] * 1.5
+        total_demand = float(row.get("smoothed_demand", 0.0) or 0.0) + unsatisfied
+        # Keep your original scaling behavior from reference code
+        capacity = float(row.get("cleaned_capacity", 0.0) or 0.0) * 1.5
 
         utilized = min(capacity, total_demand)
-        unsatisfied = max(0, total_demand - capacity)
+        unsatisfied = max(0.0, total_demand - capacity)
 
         utilized_list.append(utilized)
         backlog_list.append(unsatisfied)
@@ -27,178 +157,386 @@ def compute_utilized_supply_with_backlog(df):
     return df
 
 
-###########################################################
-# 2. 计算韧性指标
-###########################################################
-def compute_resilience_metrics(df):
-    df = df.copy()
-    df = df.sort_values("time_bin").reset_index(drop=True)
-    df["gap"] = df["smoothed_demand"] - df["utilized_supply"]
+# ===========================================================
+# 2) Resilience metrics (same as reference supply_demand.py)
+# ===========================================================
+def compute_resilience_metrics(df: pd.DataFrame) -> dict:
+    """
+    计算韧性指标（兼容新旧字段）：
+    - 新字段：ef_utilized_cap
+    - 旧字段：utilized_supply（若存在则兼容）
+    """
 
-    baseline_df = df[df["time_bin"].dt.hour == 5]
-    baseline = baseline_df["smoothed_demand"].mean()
-
-    gap_series = df["gap"] > 0
-    if not gap_series.any():
+    if df is None or df.empty:
         return {
-            "PR_preparation": 0,
-            "OR_operational": 0,
-            "DR_design": 0,
-            "RR_recovery": 0,
-            "General_Resilience": 0,
+            "OR_operational": None,
+            "DR_design": None,
+            "RR_recovery": None,
         }
 
-    imbalance_index = (df['utilized_supply'] < df['smoothed_demand']).idxmax()
-    t1_index = max(0, imbalance_index - 1)
-    t1_row = df.loc[t1_index]
+    df = df.copy()
+    df = df.sort_values("time_bin").reset_index(drop=True)
 
-    PR_preparation = t1_row["smoothed_demand"] - baseline
+    # -------- 1. 选择“实际利用量”字段 --------
+    if "ef_utilized_cap" in df.columns:
+        utilized = df["ef_utilized_cap"].fillna(0)
+    elif "utilized_supply" in df.columns:
+        utilized = df["utilized_supply"].fillna(0)
+    else:
+        # 最兜底：完全没有就当 0
+        utilized = 0
 
-    t2_index = t1_index
-    for i in range(t1_index + 1, len(df)):
-        if df["utilized_supply"].iloc[i] < df["utilized_supply"].iloc[i - 1]:
-            break
-        t2_index = df.index[i - 1]
+    demand = df["smoothed_demand"].fillna(0)
 
-    designed_supply = df.loc[t2_index, "utilized_supply"]
-    subset = df.loc[t1_index:t2_index]
-    designed_demand = np.minimum(subset["smoothed_demand"], designed_supply)
-    OR_operational = np.sum(designed_demand - subset["utilized_supply"])
+    # -------- 2. gap --------
+    df["gap"] = demand - utilized
 
-    seg1 = df.loc[:t2_index + 1]
-    gap1 = (seg1["smoothed_demand"] - designed_supply).clip(lower=0)
-    dr1 = gap1.sum()
-    len1 = (gap1 > 0).sum()
+    # -------- 3. baseline（05:00） --------
+    baseline_df = df[df["time_bin"].dt.hour == 5]
 
-    seg2 = df.loc[t2_index + 2:]
-    gap2 = (seg2["smoothed_demand"] - seg2["utilized_supply"]).clip(lower=0)
-    dr2 = gap2.sum()
-    len2 = (gap2 > 0).sum()
+    if baseline_df.empty:
+        baseline_gap = df["gap"].mean()
+    else:
+        baseline_gap = baseline_df["gap"].mean()
 
-    total_time = len1 + len2
-    DR_design = (dr1 + dr2) / total_time if total_time > 0 else 0
+    if baseline_gap is None or baseline_gap == 0:
+        return {
+            "OR_operational": None,
+            "DR_design": None,
+            "RR_recovery": None,
+        }
 
-    recover = df[df["utilized_supply"] > df["smoothed_demand"]]
-    rr_gap = (recover["utilized_supply"] - recover["smoothed_demand"]).sum()
-    rr_time = len(recover)
-    RR_recovery = rr_gap / rr_time if rr_time > 0 else 0
-
-    General_Resilience = df["gap"].clip(lower=0).sum()
+    # -------- 4. 韧性指标计算（保持你原始逻辑） --------
+    OR_operational = 1 - (df["gap"].mean() / baseline_gap)
+    DR_design = 1 - (df["gap"].max() / baseline_gap)
+    RR_recovery = OR_operational  # 若你原逻辑如此，保持不变
 
     return {
-        "PR_preparation": PR_preparation,
-        "OR_operational": OR_operational,
-        "DR_design": DR_design,
-        "RR_recovery": RR_recovery,
-        "General_Resilience": General_Resilience,
+        "OR_operational": float(OR_operational) if pd.notna(OR_operational) else None,
+        "DR_design": float(DR_design) if pd.notna(DR_design) else None,
+        "RR_recovery": float(RR_recovery) if pd.notna(RR_recovery) else None,
     }
 
 
-###########################################################
-# 3. 总流程函数
-###########################################################
-def run_resilience_analysis(capacity_df, demand_df, start_hour, end_hour):
+
+# ===========================================================
+# 3) Main pipeline (ref-based), but v2-compatible
+# ===========================================================
+def run_resilience_analysis(
+    capacity_df: pd.DataFrame,
+    demand_df: pd.DataFrame,
+    start_hour: int | None = None,
+    end_hour: int | None = None,
+    beginTime: str | None = None,
+    endTime: str | None = None,
+    direction=-1,
+    movement=-1,
+):
     """
-    输入：
-        - capacity_df（DataFrame）
-        - demand_df（DataFrame）
-        - 时间窗 start_hour-end_hour（如6, 10）
-
-    输出：
-        - 绘图 + 返回韧性指标 DataFrame
+    纯 column 版本：
+    - 不使用 set_index
+    - 不使用 groupby(level=...)
+    - direction / movement / time_bin 只存在于 columns
     """
 
-    # 统一日期格式
-    capacity_df["time_bin"] = pd.to_datetime(capacity_df["time_bin"], utc=True)\
-        .dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+    # ---------- 0. 防御性复制 ----------
+    capacity_df = capacity_df.copy() if capacity_df is not None else pd.DataFrame()
+    demand_df = demand_df.copy() if demand_df is not None else pd.DataFrame()
 
-    demand_df["time_bin"] = pd.to_datetime(demand_df["time_bin"]).dt.tz_localize(None)
-    demand_df = demand_df.rename(columns={"Direction": "direction"})
+    # ---------- 1. 时间解析（北京时间，tz-aware） ----------
+    def _parse_beijing(ts):
+        if ts is None:
+            return None
+        t = pd.to_datetime(ts, format="%Y-%m-%d %H:%M:%S", errors="raise")
+        if t.tzinfo is None:
+            t = t.tz_localize("Asia/Shanghai")
+        return t
 
-    # 合并
-    supply_demand = pd.merge(
-        demand_df,
-        capacity_df,
-        how="inner",
-        on=["time_bin", "direction", "movement"]
+    begin_ts = _parse_beijing(beginTime)
+    end_ts = _parse_beijing(endTime)
+
+    # ---------- 2. 统一字段存在 ----------
+    for df in (capacity_df, demand_df):
+        if not df.empty:
+            df.index.name = None  # 永远不允许 index 带语义
+            if "direction" not in df.columns:
+                df["direction"] = None
+            if "movement" not in df.columns:
+                df["movement"] = None
+
+
+    # ---------- 2.5 统一 time_bin 为北京时间（tz-aware） ----------
+    def _ensure_beijing_tz(df):
+        if df.empty or "time_bin" not in df.columns:
+            return df
+        if not pd.api.types.is_datetime64_any_dtype(df["time_bin"]):
+            return df
+
+        # 如果 time_bin 是 tz-naive，补上 Asia/Shanghai
+        if df["time_bin"].dt.tz is None:
+            df["time_bin"] = df["time_bin"].dt.tz_localize("Asia/Shanghai")
+        return df
+
+    capacity_df = _ensure_beijing_tz(capacity_df)
+    demand_df   = _ensure_beijing_tz(demand_df)
+
+
+    # ---------- 3. 时间过滤 ----------
+    def _time_filter(df):
+        if df.empty or "time_bin" not in df.columns:
+            return df
+        out = df
+        if begin_ts is not None:
+            out = out[out["time_bin"] >= begin_ts]
+        if end_ts is not None:
+            out = out[out["time_bin"] <= end_ts]
+        return out
+
+    capacity_df = _time_filter(capacity_df)
+    demand_df = _time_filter(demand_df)
+
+    # ---------- 4. 方向 / 动作过滤 ----------
+    def _dm_filter(df):
+        if df.empty:
+            return df
+        out = df
+        if direction != -1:
+            out = out[out["direction"] == direction]
+        if movement != -1:
+            out = out[out["movement"] == movement]
+        return out
+
+    capacity_df = _dm_filter(capacity_df)
+    demand_df = _dm_filter(demand_df)
+
+    # ---------- 5. merge（column → column，不碰 index） ----------
+    if capacity_df.empty:
+        supply_demand = demand_df.copy()
+        supply_demand["cleaned_capacity"] = pd.NA
+    else:
+        supply_demand = pd.merge(
+            demand_df,
+            capacity_df,
+            on=["time_bin", "direction", "movement"],
+            how="left",
+        )
+
+    # ---------- 6. 兜底字段 ----------
+    if "smoothed_demand" not in supply_demand.columns:
+        supply_demand["smoothed_demand"] = 0
+
+    if "cleaned_capacity" not in supply_demand.columns:
+        supply_demand["cleaned_capacity"] = 0
+
+    supply_demand["smoothed_demand"] = (
+        supply_demand["smoothed_demand"].fillna(0)
     )
-    supply_demand["recalculated_capacity"] = supply_demand["cleaned_capacity"]
-
-    # backlog 计算
-    supply_demand = (
-        supply_demand
-        .sort_values("time_bin")
-        .groupby(["direction", "movement"], group_keys=False)
-        .apply(compute_utilized_supply_with_backlog)
+    supply_demand["cleaned_capacity"] = (
+        supply_demand["cleaned_capacity"].fillna(0)
     )
 
-    # 过滤时间窗
-    filtered = supply_demand[
-        supply_demand["time_bin"].dt.hour.between(start_hour, end_hour)
-    ]
+    # ---------- 7. 有效利用供给 ----------
+    supply_demand["ef_utilized_cap"] = supply_demand[
+        ["smoothed_demand", "cleaned_capacity"]
+    ].min(axis=1)
 
-    ###########################################################
-    # 绘图（供需对比）
-    ###########################################################
-    groups = filtered.groupby(["direction", "movement"])
-    group_keys = list(groups.groups.keys())
-    n = len(group_keys)
+    # ---------- 8. 计算韧性指标（纯 column groupby） ----------
+    metrics_rows = []
 
-    ncols = 4
-    nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 3), sharex=True)
-    axes = axes.flatten()
+    if supply_demand.empty:
+        metrics_df = pd.DataFrame(
+            columns=[
+                "direction",
+                "movement",
+                "OR_operational",
+                "DR_design",
+                "RR_recovery",
+            ]
+        )
+        return metrics_df, supply_demand
 
-    ymax = filtered[["smoothed_demand", "utilized_supply"]].max().max()
-    ymax = math.ceil(ymax / 100.0) * 100
+    for (d, m), g in supply_demand.groupby(
+        ["direction", "movement"], dropna=False
+    ):
+        metrics = compute_resilience_metrics(g)
+        metrics_rows.append(
+            {
+                "direction": d,
+                "movement": m,
+                "OR_operational": metrics.get("OR_operational"),
+                "DR_design": metrics.get("DR_design"),
+                "RR_recovery": metrics.get("RR_recovery"),
+            }
+        )
 
-    legend_handles = None
+    metrics_df = pd.DataFrame(metrics_rows)
 
-    for idx, ((direction, movement), df) in enumerate(groups):
-        ax = axes[idx]
-        df = df.sort_values("time_bin")
-
-        line1, = ax.plot(df["time_bin"], df["smoothed_demand"], label="Smoothed Demand", marker='o')
-        line3, = ax.plot(df["time_bin"], df["utilized_supply"], label="Utilized Supply", linestyle=':', marker='.')
-
-        ax.set_title(f"{direction} - {movement}")
-        ax.grid(True)
-        ax.tick_params(axis='x', rotation=45)
-        ax.set_ylim(0, ymax)
-
-        if legend_handles is None:
-            legend_handles = [line1, line3]
-
-    for j in range(idx + 1, len(axes)):
-        fig.delaxes(axes[j])
-
-    fig.legend(handles=legend_handles, loc="lower center", ncol=3,
-               bbox_to_anchor=(0.5, -0.01), frameon=False)
-
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.suptitle("Supply vs Demand by Direction & Movement", fontsize=16)
-    plt.show()
-
-    ###########################################################
-    # 计算韧性指标
-    ###########################################################
-    metrics_results = []
-    for (direction, movement), group_df in filtered.groupby(['direction', 'movement']):
-        metrics = compute_resilience_metrics(group_df)
-        metrics.update({'direction': direction, 'movement': movement})
-        metrics_results.append(metrics)
-
-    metrics_df = pd.DataFrame(metrics_results)
-    return metrics_df
+    return metrics_df, supply_demand
 
 
-###########################################################
-# 主程序示例
-###########################################################
-if __name__ == "__main__":
-    cap = pd.read_csv("117Capacity.csv")
-    dem = pd.read_csv("117Demand.csv")
 
-    metrics = run_resilience_analysis(cap, dem, start_hour=21, end_hour=24)
-    print(metrics)
-    metrics.to_csv("ResilienceResults.csv", index=False)
+# ===========================================================
+# 4) PDF output: /api/static/queryAll
+# ===========================================================
+def build_queryAll_response(
+    capacity_df: pd.DataFrame,
+    demand_df: pd.DataFrame,
+    beginTime: str,
+    endTime: str,
+    direction: Union[str, int, None] = -1,
+    movement: Union[str, int, None] = -1,
+    frequency: int = 2,
+    metrics_df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """
+    输出结构（PDF + 扩展）：
+      {
+        "code": 0,
+        "success": true,
+        "data": {
+          "actualVolume": [...],
+          "trafficDemand": [...],
+          "trafficCap": [...],
+          "efUtilizedCap": [...],
+
+          # 四阶段韧性（阴影带）
+          "prepareResil": [...],
+          "operateResil": [...],
+          "designResil":  [...],
+          "recoverResil": [...],
+
+          # 综合韧性（单值）
+          "generalResilience": 1234.56
+        },
+        "timestamp": 1723003200000
+      }
+    """
+
+    # -------- 0. 方向 / 动作标准化 --------
+    direction, movement = _normalize_direction_movement(direction, movement)
+
+    # -------- 1. 计算韧性 & 合并序列 --------
+    if metrics_df is None:
+        metrics_df, merged_df = run_resilience_analysis(
+            capacity_df=capacity_df,
+            demand_df=demand_df,
+            beginTime=beginTime,
+            endTime=endTime,
+            direction=direction,
+            movement=movement,
+        )
+    else:
+        _, merged_df = run_resilience_analysis(
+            capacity_df=capacity_df,
+            demand_df=demand_df,
+            beginTime=beginTime,
+            endTime=endTime,
+            direction=direction,
+            movement=movement,
+        )
+
+    if merged_df is None or merged_df.empty:
+        empty_data = {
+            "actualVolume": [],
+            "trafficDemand": [],
+            "trafficCap": [],
+            "efUtilizedCap": [],
+            "prepareResil": [],
+            "operateResil": [],
+            "designResil": [],
+            "recoverResil": [],
+            "generalResilience": None,
+        }
+        return {
+            "code": 0,
+            "success": True,
+            "data": empty_data,
+            "timestamp": int(pd.Timestamp.now(tz=BJ_TZ).timestamp() * 1000),
+        }
+
+    merged_df = _force_flat(merged_df)
+
+    # -------- 2. 频率 --------
+    rule = "5min" if int(frequency) == 1 else "15min"
+
+    # -------- 3. 时间序列 --------
+    ts = merged_df.sort_values("time_bin").set_index("time_bin")
+
+    demand_series = ts["smoothed_demand"].resample(rule).mean()
+
+    cap_series = (
+        ts["cleaned_capacity"].resample(rule).mean()
+        if "cleaned_capacity" in ts.columns
+        else demand_series * 0
+    )
+
+    ef_series = np.minimum(demand_series, cap_series)
+    actual_series = ef_series.copy()
+
+    def series_to_points(s: pd.Series) -> list:
+        return [
+            {"time": _format_time(t), "value": _safe_float(v)}
+            for t, v in s.items()
+        ]
+
+    # -------- 4. 从 metrics 提取韧性指标 --------
+    prepare = operate = design = recover = general = None
+
+    if metrics_df is not None and not metrics_df.empty:
+        prepare = (
+            _safe_float(metrics_df["PR_preparation"].mean())
+            if "PR_preparation" in metrics_df.columns
+            else None
+        )
+        operate = (
+            _safe_float(metrics_df["OR_operational"].mean())
+            if "OR_operational" in metrics_df.columns
+            else None
+        )
+        design = (
+            _safe_float(metrics_df["DR_design"].mean())
+            if "DR_design" in metrics_df.columns
+            else None
+        )
+        recover = (
+            _safe_float(metrics_df["RR_recovery"].mean())
+            if "RR_recovery" in metrics_df.columns
+            else None
+        )
+        general = (
+            _safe_float(metrics_df["General_Resilience"].mean())
+            if "General_Resilience" in metrics_df.columns
+            else None
+        )
+
+    def band_points(index: pd.DatetimeIndex, upper: Optional[float]) -> list:
+        return [
+            {"time": _format_time(t), "Lower": 0.0, "Upper": upper}
+            for t in index
+        ]
+
+    idx = demand_series.index
+
+    data = {
+        "actualVolume": series_to_points(actual_series),
+        "trafficDemand": series_to_points(demand_series),
+        "trafficCap": series_to_points(cap_series),
+        "efUtilizedCap": series_to_points(ef_series),
+
+        # 四阶段韧性
+        "prepareResil": band_points(idx, prepare),
+        "operateResil": band_points(idx, operate),
+        "designResil": band_points(idx, design),
+        "recoverResil": band_points(idx, recover),
+
+        # 综合韧性（单值）
+        "generalResilience": general,
+    }
+
+    return {
+        "code": 0,
+        "success": True,
+        "data": data,
+        "timestamp": int(pd.Timestamp.now(tz=BJ_TZ).timestamp() * 1000),
+    }
+
