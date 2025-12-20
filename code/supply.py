@@ -4,8 +4,52 @@
 
 import requests
 import pandas as pd
-from TFlight import SignalAnalyzer, calculate_green_occ
+from TFlight_old import SignalAnalyzer, calculate_green_occ
 
+
+
+# ============================================================
+#        查询参数工具函数
+# ============================================================
+def _parse_beijing_time(value):
+    """Parse 'YYYY-MM-DD HH:mm:ss' (assumed Asia/Shanghai) into tz-naive pandas Timestamp."""
+    if value is None or value == "" or value == -1:
+        return None
+    ts = pd.to_datetime(value, format="%Y-%m-%d %H:%M:%S", errors="raise")
+    return ts.to_pydatetime()
+
+def _parse_direction_movement(direction, movement):
+    if direction in (None, "", -1, "-1"):
+        d = None
+        m = None
+    else:
+        direction = str(direction)
+        if "-" in direction and len(direction.split("-")) == 2:
+            d_part, m_part = direction.split("-", 1)
+            d = d_part.strip().upper()
+            m = m_part.strip().upper()
+        else:
+            d = direction.strip().upper()
+            m = None
+
+    if movement not in (None, "", -1, "-1"):
+        mv = str(movement).strip()
+        if mv.upper() in ("L", "T", "R"):
+            m = mv.upper()
+        else:
+            mv_low = mv.lower()
+            if "left" in mv_low:
+                m = "L"
+            elif "through" in mv_low or "straight" in mv_low:
+                m = "T"
+            elif "right" in mv_low:
+                m = "R"
+            else:
+                m = mv
+
+    movement_map = {"L": "Left Turn", "T": "Through", "R": "Right Turn"}
+    movement_name = movement_map.get(m, None) if m in movement_map else (movement if movement not in (None,"", -1, "-1") else None)
+    return d, movement_name
 
 # ============================================================
 # 1. 获取交通灯与相位映射
@@ -182,7 +226,11 @@ def run_capacity_pipeline(
     phase_map_path: str,
     signal_file: str,
     lane_csv_path: str,
-    green_output_path: str = "temp_green_ratio_output.csv"   
+    green_output_path: str = "temp_green_ratio_output.csv",
+    beginTime=None,
+    endTime=None,
+    direction=-1,
+    movement=-1
 ):
 
     mapping, phase_map = fetch_phase_mapping(base_url, cross_id, phase_map_path)
@@ -198,5 +246,25 @@ def run_capacity_pipeline(
     agg_df = aggregate_to_15min(signal_df)
 
     final_df = match_lane_and_capacity(agg_df, lane_csv_path)
+
+    # ============================================================
+    # 按查询参数过滤（可选）
+    # ============================================================
+    begin_dt = _parse_beijing_time(beginTime)
+    end_dt = _parse_beijing_time(endTime)
+
+    # time_bin is already 15min bins; keep tz-naive for filtering
+    final_df["time_bin"] = pd.to_datetime(final_df["time_bin"], errors="coerce", utc=True)        .dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
+
+    if begin_dt is not None:
+        final_df = final_df[final_df["time_bin"] >= begin_dt]
+    if end_dt is not None:
+        final_df = final_df[final_df["time_bin"] <= end_dt]
+
+    d_filter, m_filter = _parse_direction_movement(direction, movement)
+    if d_filter is not None:
+        final_df = final_df[final_df["direction"].astype(str).str.upper() == d_filter]
+    if m_filter is not None:
+        final_df = final_df[final_df["movement"].astype(str) == m_filter]
 
     return final_df
